@@ -4,8 +4,8 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "developer-guides-mcp",
-	"main": "src/index.ts",
+	"name": "guide-uploader",
+	"main": "src/upload.ts",
 	"compatibility_date": "2025-11-01",
 	"compatibility_flags": [
 		"global_fetch_strictly_public"
@@ -16,6 +16,28 @@
 	},
 	"observability": {
 		"enabled": true
+	},
+	"r2_buckets": [
+		{
+			"binding": "GUIDES_BUCKET",
+			"bucket_name": "developer-guides"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "developer-guides-db",
+			"database_id": "7eb82379-191c-4fbe-90dd-463c839655de"
+		}
+	],
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "developer-guides-index"
+		}
+	],
+	"vars": {
+		"ENVIRONMENT": "production"
 	}
 	/**
 	 * Smart Placement
