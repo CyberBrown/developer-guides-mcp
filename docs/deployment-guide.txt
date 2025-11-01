@@ -1,0 +1,580 @@
+# Developer Guide MCP Server - Deployment Guide
+
+## Overview
+
+This guide walks you through deploying your developer guideline system using:
+- **R2** for markdown storage
+- **D1** for metadata and keyword search
+- **Vectorize** for semantic search
+- **Cloudflare Workers** for MCP server
+
+---
+
+## Architecture Summary
+
+```
+┌─────────────────────────────────────────────────┐
+│           Claude Code CLI (MCP Client)           │
+└───────────────────┬─────────────────────────────┘
+                    │ MCP Protocol
+┌───────────────────▼─────────────────────────────┐
+│              MCP Server (Worker)                 │
+│  ┌───────────────────────────────────────────┐  │
+│  │  Tools:                                    │  │
+│  │  - search_developer_guides                │  │
+│  │  - get_guide                              │  │
+│  │  - list_guides                            │  │
+│  │  - get_related_guides                     │  │
+│  │  - propose_guide_change                   │  │
+│  └───────────────────────────────────────────┘  │
+└─────────┬───────────────┬──────────────┬────────┘
+          │               │              │
+   ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼─────┐
+   │ D1 Database │ │  Vectorize  │ │ R2 Bucket│
+   │  (Metadata) │ │  (Semantic) │ │(Markdown)│
+   └─────────────┘ └─────────────┘ └──────────┘
+```
+
+---
+
+## Step 1: Prepare Markdown Files
+
+### Option A: Copy from Artifacts (Manual)
+
+1. Create local directory:
+```bash
+mkdir -p coding-guides
+cd coding-guides
+```
+
+2. Copy each guide from the artifacts into separate `.md` files:
+- `00-Developer-Guide-Index.md`
+- `01-Fundamentals-Guide.md`
+- `02-Architecture-and-11-DevOps-Guide.md`
+- `03-Frontend-Development-Guide.md`
+- `04-Cloudflare-Workers-Guide.md`
+- `05-Database-and-10-Performance-Guide.md`
+- `06-AI-ML-and-08-Observability-Guide.md`
+- `07-Security-Guide.md`
+- `09-Testing-Guide.md`
+
+### Option B: Use Google Drive (if you uploaded there)
+
+Skip to Step 3 and fetch from Google Drive in processing script.
+
+---
+
+## Step 2: Create Cloudflare Resources
+
+### Create R2 Bucket
+
+```bash
+# Create bucket for markdown storage
+wrangler r2 bucket create developer-guides
+
+# Verify
+wrangler r2 bucket list
+```
+
+### Create D1 Database
+
+```bash
+# Create database
+wrangler d1 create developer-guides-db
+
+# Note the database_id from output
+```
+
+### Create Vectorize Index
+
+```bash
+# Create vector index for semantic search
+wrangler vectorize create developer-guides-index \
+  --dimensions=768 \
+  --metric=cosine
+
+# Note the index name from output
+```
+
+---
+
+## Step 3: Initialize D1 Database
+
+Create `schema.sql`:
+
+```sql
+-- Guides metadata
+CREATE TABLE IF NOT EXISTS guides (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  subcategory TEXT,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  version TEXT NOT NULL,
+  last_updated TEXT NOT NULL,
+  tags TEXT NOT NULL,
+  related_guides TEXT,
+  markdown_url TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_guides_category ON guides(category);
+CREATE INDEX idx_guides_status ON guides(status);
+CREATE INDEX idx_guides_tags ON guides(tags);
+
+-- Sections
+CREATE TABLE IF NOT EXISTS sections (
+  id TEXT PRIMARY KEY,
+  guide_id TEXT NOT NULL,
+  level INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  FOREIGN KEY (guide_id) REFERENCES guides(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_sections_guide_id ON sections(guide_id);
+CREATE INDEX idx_sections_title ON sections(title);
+
+-- Code examples
+CREATE TABLE IF NOT EXISTS code_examples (
+  id TEXT PRIMARY KEY,
+  guide_id TEXT NOT NULL,
+  section_id TEXT NOT NULL,
+  language TEXT NOT NULL,
+  code TEXT NOT NULL,
+  caption TEXT,
+  FOREIGN KEY (guide_id) REFERENCES guides(id) ON DELETE CASCADE,
+  FOREIGN KEY (section_id) REFERENCES sections(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_code_examples_guide_id ON code_examples(guide_id);
+CREATE INDEX idx_code_examples_language ON code_examples(language);
+
+-- Full-text search
+CREATE VIRTUAL TABLE IF NOT EXISTS guides_fts USING fts5(
+  guide_id UNINDEXED,
+  title,
+  content,
+  tags
+);
+
+-- Change proposals
+CREATE TABLE IF NOT EXISTS change_proposals (
+  id TEXT PRIMARY KEY,
+  guide_id TEXT NOT NULL,
+  section TEXT NOT NULL,
+  current_text TEXT NOT NULL,
+  proposed_text TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  proposed_by TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reviewed_by TEXT,
+  review_notes TEXT,
+  created_at DATETIME NOT NULL,
+  reviewed_at DATETIME,
+  FOREIGN KEY (guide_id) REFERENCES guides(id)
+);
+
+CREATE INDEX idx_proposals_status ON change_proposals(status);
+CREATE INDEX idx_proposals_guide_id ON change_proposals(guide_id);
+```
+
+Apply schema:
+
+```bash
+# Apply to local D1
+wrangler d1 execute developer-guides-db --local --file=schema.sql
+
+# Apply to production D1
+wrangler d1 execute developer-guides-db --remote --file=schema.sql
+```
+
+---
+
+## Step 4: Project Setup
+
+### Create Worker Project
+
+```bash
+npm create cloudflare@latest developer-guides-mcp
+# Choose:
+# - Template: "Hello World" Worker
+# - TypeScript: Yes
+# - Git: Yes
+# - Deploy: No (we'll do this later)
+
+cd developer-guides-mcp
+```
+
+### Install Dependencies
+
+```bash
+npm install hono yaml marked marked-highlight
+npm install -D @cloudflare/workers-types @types/marked
+```
+
+### Configure wrangler.toml
+
+```toml
+name = "developer-guides-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# R2 Bucket binding
+[[r2_buckets]]
+binding = "GUIDES_BUCKET"
+bucket_name = "developer-guides"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "developer-guides-db"
+database_id = "YOUR_DATABASE_ID"  # From step 2
+
+# Vectorize binding
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "developer-guides-index"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+```
+
+---
+
+## Step 5: Upload Guides
+
+### Create Upload Script
+
+Create `scripts/upload-guides.ts`:
+
+```typescript
+import * as fs from 'fs';
+import * as path from 'path';
+import { processAndUploadGuides } from '../src/guide-processor';
+
+async function main() {
+  const guidesDir = './coding-guides';
+  const files = fs.readdirSync(guidesDir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => ({
+      name: f,
+      content: fs.readFileSync(path.join(guidesDir, f), 'utf-8')
+    }));
+  
+  console.log(`Found ${files.length} guide files`);
+  
+  // This would connect to your Worker's bindings
+  // For actual upload, you'd deploy a temporary Worker endpoint
+  console.log('Files ready for upload:', files.map(f => f.name));
+}
+
+main().catch(console.error);
+```
+
+### Deploy Upload Worker
+
+Create `src/upload.ts`:
+
+```typescript
+import { processAndUploadGuides } from './guide-processor';
+import { Hono } from 'hono';
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.post('/upload', async (c) => {
+  const { files } = await c.req.json();
+  
+  await processAndUploadGuides(files, {
+    r2: c.env.GUIDES_BUCKET,
+    db: c.env.DB,
+    vectorize: c.env.VECTORIZE
+  });
+  
+  return c.json({ success: true });
+});
+
+export default app;
+```
+
+### Upload Guides
+
+```bash
+# Deploy upload worker temporarily
+wrangler deploy src/upload.ts --name guide-uploader
+
+# Upload via API
+curl -X POST https://guide-uploader.YOUR_SUBDOMAIN.workers.dev/upload \
+  -H "Content-Type: application/json" \
+  -d @guides-payload.json
+
+# Or use wrangler tail to debug
+wrangler tail guide-uploader
+```
+
+---
+
+## Step 6: Deploy MCP Server
+
+### Main Server Code
+
+Place the MCP server implementation in `src/index.ts`
+
+### Deploy
+
+```bash
+# Deploy to production
+wrangler deploy
+
+# Test deployment
+curl https://developer-guides-mcp.YOUR_SUBDOMAIN.workers.dev/health
+```
+
+### Verify Deployment
+
+```bash
+# Check guides are uploaded
+wrangler d1 execute developer-guides-db --command="SELECT COUNT(*) FROM guides"
+
+# Check R2 objects
+wrangler r2 object list developer-guides
+
+# Test search
+curl -X POST https://developer-guides-mcp.YOUR_SUBDOMAIN.workers.dev/tools/search_developer_guides \
+  -H "Content-Type: application/json" \
+  -d '{"query": "qwik components"}'
+```
+
+---
+
+## Step 7: Configure MCP in Claude Code CLI
+
+### Create MCP Configuration
+
+Create `~/.config/claude/mcp-servers.json`:
+
+```json
+{
+  "developer-guides": {
+    "url": "https://developer-guides-mcp.YOUR_SUBDOMAIN.workers.dev",
+    "tools": [
+      {
+        "name": "search_developer_guides",
+        "description": "Search developer guidelines by keyword, category, framework, or tag",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search query"
+            },
+            "category": {
+              "type": "string",
+              "enum": ["frontend", "backend", "database", "security", "testing", "devops", "ai-ml", "observability"]
+            },
+            "framework": {
+              "type": "string",
+              "enum": ["qwik", "react", "cloudflare-workers"]
+            },
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "limit": {
+              "type": "number",
+              "default": 5
+            }
+          },
+          "required": ["query"]
+        }
+      },
+      {
+        "name": "get_guide",
+        "description": "Retrieve complete guide or specific section",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "guideId": { "type": "string" },
+            "sectionId": { "type": "string" }
+          },
+          "required": ["guideId"]
+        }
+      },
+      {
+        "name": "list_guides",
+        "description": "List all available guides",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "category": { "type": "string" },
+            "status": { "type": "string" }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+### Test MCP Integration
+
+```bash
+# Start Claude Code CLI
+claude-code
+
+# Test search
+> Can you search the developer guides for "qwik components"?
+
+# The CLI should call the MCP server and return results
+```
+
+---
+
+## Step 8: Monitoring & Maintenance
+
+### Set Up Monitoring
+
+```bash
+# Tail logs
+wrangler tail developer-guides-mcp
+
+# Check analytics
+wrangler pages deployments list
+```
+
+### Update Guides
+
+```bash
+# 1. Update markdown files locally
+# 2. Re-run upload script
+# 3. Verify changes
+wrangler d1 execute developer-guides-db \
+  --command="SELECT title, version FROM guides WHERE id='03-frontend'"
+```
+
+---
+
+## Troubleshooting
+
+### Guides Not Appearing in Search
+
+```bash
+# Check D1 data
+wrangler d1 execute developer-guides-db \
+  --command="SELECT COUNT(*) FROM guides"
+
+# Check FTS index
+wrangler d1 execute developer-guides-db \
+  --command="SELECT COUNT(*) FROM guides_fts"
+
+# Rebuild FTS if needed
+wrangler d1 execute developer-guides-db \
+  --command="DELETE FROM guides_fts; INSERT INTO guides_fts SELECT ..."
+```
+
+### Vectorize Not Working
+
+```bash
+# Check index status
+wrangler vectorize get developer-guides-index
+
+# Re-vectorize if needed
+# (Would need to rerun upload with vectorize enabled)
+```
+
+### R2 Access Issues
+
+```bash
+# Check bucket exists
+wrangler r2 bucket list
+
+# Check object count
+wrangler r2 object list developer-guides
+
+# Test read
+wrangler r2 object get developer-guides/guides/00-index.md
+```
+
+---
+
+## Performance Optimization
+
+### Enable Caching
+
+```typescript
+// In your MCP server
+app.use('*', async (c, next) => {
+  await next();
+  
+  // Cache search results for 5 minutes
+  if (c.req.path.startsWith('/tools/search')) {
+    c.header('Cache-Control', 'public, max-age=300');
+  }
+  
+  // Cache guides for 1 hour
+  if (c.req.path.startsWith('/tools/get_guide')) {
+    c.header('Cache-Control', 'public, max-age=3600');
+  }
+});
+```
+
+### Monitor Performance
+
+```typescript
+// Add performance tracking
+app.use('*', async (c, next) => {
+  const start = Date.now();
+  await next();
+  const duration = Date.now() - start;
+  
+  console.log(JSON.stringify({
+    path: c.req.path,
+    duration,
+    timestamp: new Date().toISOString()
+  }));
+});
+```
+
+---
+
+## Cost Estimation
+
+### Cloudflare Pricing (as of 2025)
+
+- **Workers**: 100,000 requests/day free, then $0.50/million
+- **D1**: 5GB storage free, 25 million reads/month free
+- **R2**: 10GB storage free, 10 million Class A operations/month free
+- **Vectorize**: Pricing varies, check Cloudflare dashboard
+
+### Expected Costs (for small team)
+
+- **Development**: $0/month (within free tier)
+- **Small Team (10 developers)**: ~$5-10/month
+- **Medium Team (50 developers)**: ~$20-30/month
+
+---
+
+## Next Steps
+
+1. ✅ Deploy infrastructure (R2, D1, Vectorize)
+2. ✅ Upload guides
+3. ✅ Deploy MCP server
+4. ✅ Configure Claude Code CLI
+5. ⏭️ Test with real development tasks
+6. ⏭️ Gather feedback
+7. ⏭️ Iterate and improve
+
+---
+
+## Success Metrics
+
+- **Search Quality**: 95%+ relevant results
+- **Response Time**: < 200ms for searches
+- **Availability**: 99.9%+ uptime
+- **Developer Satisfaction**: Easy to find answers
+
+**You're ready to deploy! 🚀**
