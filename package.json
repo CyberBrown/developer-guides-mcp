@@ -11,8 +11,16 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@cloudflare/workers-types": "^4.20251014.0",
+		"@types/marked": "^5.0.2",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.45.3"
+	},
+	"dependencies": {
+		"hono": "^4.10.4",
+		"marked": "^16.4.1",
+		"marked-highlight": "^2.2.2",
+		"yaml": "^2.8.1"
 	}
 }
