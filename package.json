@@ -18,9 +18,12 @@
 		"wrangler": "^4.45.3"
 	},
 	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.10.2",
+		"fetch-to-node": "^2.1.0",
 		"hono": "^4.10.4",
 		"marked": "^16.4.1",
 		"marked-highlight": "^2.2.2",
-		"yaml": "^2.8.1"
+		"yaml": "^2.8.1",
+		"zod": "^3.24.1"
 	}
 }

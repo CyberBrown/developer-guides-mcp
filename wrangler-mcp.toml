@@ -1,6 +1,7 @@
 name = "developer-guides-mcp"
 main = "src/index.ts"
 compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
 
 # R2 Bucket binding
 [[r2_buckets]]
