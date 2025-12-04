@@ -19,6 +19,7 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.10.2",
+		"agents": "^0.2.29",
 		"fetch-to-node": "^2.1.0",
 		"hono": "^4.10.4",
 		"marked": "^16.4.1",
