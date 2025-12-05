@@ -25,6 +25,16 @@ Developer Guides MCP acts as a bridge between AI assistants (like Claude) and a 
 - **[Cloudflare Vectorize](https://developers.cloudflare.com/vectorize/)** - Vector database for semantic search
 - **TypeScript** with **Zod** validation
 
+## Quick Start: Using with Claude Code
+
+**First step when using this MCP server:** Verify your project's `CLAUDE.md` is configured correctly.
+
+1. Check [docs/CLAUDE-MD-SETUP.md](docs/CLAUDE-MD-SETUP.md) for the latest setup instructions
+2. Look for the version comment in your `CLAUDE.md`: `<!-- Developer Guides MCP Setup vX.X.X -->`
+3. If missing or outdated, update your `CLAUDE.md` with the latest template
+
+This ensures Claude Code knows how to use the developer guides effectively.
+
 ## Installation
 
 ```bash
