@@ -4,9 +4,9 @@ title: Developer Guide Index & Navigation
 category: meta
 type: index
 status: finalized
-version: 2.0.0
-last_updated: 2025-11-01
-tags: [index, navigation, overview, getting-started]
+version: 2.1.0
+last_updated: 2025-12-04
+tags: [index, navigation, overview, getting-started, ecosystem, DE, multi-agent]
 ---
 
 # Developer Guide Index & Navigation
@@ -109,6 +109,57 @@ New to these guides? Start here:
 - **Cloudflare Platform** → [04-001-Cloudflare-Workers](#04-001), [11-003-Cloudflare-Deployment](#11-003)
 - **Docker** → [11-004-Containerization](#11-004)
 - **Databases** → [05-Database](#05-database)
+
+---
+
+## 🏗️ Ecosystem Architecture (NEW)
+
+The Three Pillars of our development ecosystem:
+
+```
+┌─────────────────────────────────────────────┐
+│         DISTRIBUTED ELECTRONS (DE)          │
+│     Backend Processes • Worker Swarm        │
+│     "Build it once, use it everywhere"      │
+└─────────────────────────────────────────────┘
+                      ↕
+┌─────────────────────────────────────────────┐
+│                  MNEMO                       │
+│         Working Memory + Tactics             │
+│     Real-time context, conversation flow    │
+└─────────────────────────────────────────────┘
+                      ↕
+┌─────────────────────────────────────────────┐
+│                  NEXUS                       │
+│         Long-term Memory + Strategy          │
+│     Historical knowledge, decision patterns  │
+└─────────────────────────────────────────────┘
+```
+
+### Key Architecture Guides
+
+| Guide ID | Title | Focus | Status |
+|----------|-------|-------|--------|
+| ecosystem-architecture | [Ecosystem Architecture Reference](./ecosystem-architecture-reference.md) | DE, Mnemo, Nexus philosophy | ✅ |
+| scale-orchestration | [Scale & Multi-Agent Orchestration](./scale-orchestration-guide.md) | 4x4x4 model, parallel dev | 📝 |
+
+### Essential Concepts
+
+**Distributed Electrons (DE):** All backend services route through DE. Never build isolated API calls—use the worker swarm.
+
+**The Fundamental Rule:** Custom frontends + Distributed backend. Apps are interfaces; compute happens in the swarm.
+
+**Service Registry:** Query available services via MCP:
+```
+mcp__developer-guides__get_available_services
+```
+
+**Multi-Agent Development:** Scale using the 4x4x4 model (4 clusters, 4 leaders, 4 coders each).
+
+### Quick Links
+- [Check available DE services](#service-registry) → `get_available_services`
+- [Multi-agent orchestration patterns](#scale-orchestration)
+- [MCP server management](#mcp-setup) → claude-mcp-config
 
 ---
 
@@ -359,6 +410,13 @@ Create a Linear ticket with:
 ---
 
 ## Changelog
+
+### v2.1.0 (2025-12-04)
+- Added Ecosystem Architecture section (Three Pillars: DE, Mnemo, Nexus)
+- Added Scale & Multi-Agent Orchestration Guide
+- Added Ecosystem Architecture Reference
+- Added Service Registry integration via MCP
+- Updated tags for ecosystem discovery
 
 ### v2.0.0 (2025-11-01)
 - Complete restructuring and reorganization

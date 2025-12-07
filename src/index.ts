@@ -26,6 +26,23 @@ app.get('/health', (c) => {
   });
 });
 
+// Helper: Sanitize FTS5 query to handle special characters
+function sanitizeFtsQuery(query: string): string {
+  // FTS5 treats - as NOT operator, so we need to quote terms with hyphens
+  // Also handle other special characters: AND, OR, NOT, (, ), *, "
+  // Split into words and quote each term that contains special chars
+  return query
+    .split(/\s+/)
+    .map(term => {
+      // If term contains special FTS5 characters, wrap in quotes
+      if (/[-*()"]/.test(term) || /^(AND|OR|NOT)$/i.test(term)) {
+        return `"${term.replace(/"/g, '""')}"`;
+      }
+      return term;
+    })
+    .join(' ');
+}
+
 // MCP Tool: Search developer guides
 app.post('/tools/search_developer_guides', async (c) => {
   try {
@@ -34,6 +51,9 @@ app.post('/tools/search_developer_guides', async (c) => {
     if (!query) {
       return c.json({ error: 'Query parameter is required' }, 400);
     }
+
+    // Sanitize query for FTS5
+    const sanitizedQuery = sanitizeFtsQuery(query);
 
     // Use FTS5 for full-text search
     let sql = `
@@ -55,7 +75,7 @@ app.post('/tools/search_developer_guides', async (c) => {
       WHERE guides_fts MATCH ?
     `;
 
-    const params: any[] = [query];
+    const params: any[] = [sanitizedQuery];
 
     // Add filters
     if (category) {
@@ -319,6 +339,182 @@ app.post('/tools/get_guide_stats', async (c) => {
   }
 });
 
+// HTTP Endpoint: Get available services
+app.post('/tools/get_available_services', async (c) => {
+  try {
+    const { category, status, search, include_capabilities } = await c.req.json();
+
+    let sql = `
+      SELECT s.*,
+             GROUP_CONCAT(DISTINCT sp.provider_name) as providers
+      FROM services s
+      LEFT JOIN service_providers sp ON s.id = sp.service_id
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+
+    if (category) {
+      sql += ` AND s.category = ?`;
+      params.push(category);
+    }
+
+    if (status) {
+      sql += ` AND s.status = ?`;
+      params.push(status);
+    }
+
+    if (search) {
+      sql += ` AND (s.name LIKE ? OR s.description LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    sql += ` GROUP BY s.id ORDER BY s.category, s.name`;
+
+    const servicesResult = await c.env.DB.prepare(sql).bind(...params).all();
+    const services = servicesResult.results || [];
+
+    if (include_capabilities && services.length > 0) {
+      for (const service of services as any[]) {
+        const caps = await c.env.DB.prepare(
+          `SELECT capability, description, input_schema, output_schema FROM service_capabilities WHERE service_id = ?`
+        ).bind(service.id).all();
+        service.capabilities = caps.results || [];
+
+        const deps = await c.env.DB.prepare(
+          `SELECT depends_on_service_id, dependency_type FROM service_dependencies WHERE service_id = ?`
+        ).bind(service.id).all();
+        service.dependencies = deps.results || [];
+      }
+    }
+
+    return c.json({
+      success: true,
+      count: services.length,
+      services: services.map((s: any) => ({
+        ...s,
+        providers: s.providers ? s.providers.split(',') : []
+      }))
+    });
+  } catch (error: any) {
+    console.error('Get services error:', error);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
+// Webhook: Sync service registry from DE deployments
+app.post('/api/sync-registry', async (c) => {
+  try {
+    // Verify auth token (set REGISTRY_SYNC_TOKEN as a secret)
+    const authHeader = c.req.header('Authorization');
+    const expectedToken = (c.env as any).REGISTRY_SYNC_TOKEN;
+
+    if (expectedToken && authHeader !== `Bearer ${expectedToken}`) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    const body = await c.req.json();
+    const { source, commit, services } = body;
+
+    let servicesAdded = 0;
+    let servicesUpdated = 0;
+
+    // If services manifest is provided, sync them
+    if (services && Array.isArray(services)) {
+      for (const service of services) {
+        // Check if service exists
+        const existing = await c.env.DB.prepare(
+          'SELECT id FROM services WHERE id = ?'
+        ).bind(service.id).first();
+
+        if (existing) {
+          // Update existing service
+          await c.env.DB.prepare(`
+            UPDATE services SET
+              name = ?, description = ?, category = ?, status = ?,
+              de_worker_name = ?, updated_at = datetime('now')
+            WHERE id = ?
+          `).bind(
+            service.name,
+            service.description || null,
+            service.category,
+            service.status || 'active',
+            service.worker || null,
+            service.id
+          ).run();
+          servicesUpdated++;
+        } else {
+          // Insert new service
+          await c.env.DB.prepare(`
+            INSERT INTO services (id, name, description, category, status, de_worker_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).bind(
+            service.id,
+            service.name,
+            service.description || null,
+            service.category,
+            service.status || 'active',
+            service.worker || null
+          ).run();
+          servicesAdded++;
+        }
+
+        // Sync capabilities if provided
+        if (service.capabilities && Array.isArray(service.capabilities)) {
+          // Clear existing capabilities
+          await c.env.DB.prepare(
+            'DELETE FROM service_capabilities WHERE service_id = ?'
+          ).bind(service.id).run();
+
+          // Insert new capabilities
+          for (const cap of service.capabilities) {
+            const capName = typeof cap === 'string' ? cap : cap.capability;
+            const capDesc = typeof cap === 'string' ? null : cap.description;
+            await c.env.DB.prepare(`
+              INSERT INTO service_capabilities (service_id, capability, description)
+              VALUES (?, ?, ?)
+            `).bind(service.id, capName, capDesc).run();
+          }
+        }
+
+        // Sync providers if provided
+        if (service.providers && Array.isArray(service.providers)) {
+          await c.env.DB.prepare(
+            'DELETE FROM service_providers WHERE service_id = ?'
+          ).bind(service.id).run();
+
+          for (const provider of service.providers) {
+            await c.env.DB.prepare(`
+              INSERT INTO service_providers (service_id, provider_name, requires_api_key)
+              VALUES (?, ?, 1)
+            `).bind(service.id, provider).run();
+          }
+        }
+      }
+    }
+
+    // Log the sync
+    await c.env.DB.prepare(`
+      INSERT INTO registry_sync_log (source, commit_sha, synced_at, services_added, services_updated)
+      VALUES (?, ?, datetime('now'), ?, ?)
+    `).bind(
+      source || 'api',
+      commit || null,
+      servicesAdded,
+      servicesUpdated
+    ).run();
+
+    return c.json({
+      success: true,
+      synced_at: new Date().toISOString(),
+      services_added: servicesAdded,
+      services_updated: servicesUpdated
+    });
+  } catch (error: any) {
+    console.error('Registry sync error:', error);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 // MCP Tool Discovery - List available tools
 app.get('/tools', (c) => {
   return c.json({
@@ -373,6 +569,23 @@ app.get('/tools', (c) => {
         name: 'get_guide_stats',
         description: 'Get statistics about the developer guides system',
         parameters: {}
+      },
+      {
+        name: 'initialize_claude_md',
+        description: 'Get the CLAUDE.md setup template and version info. Call this first when starting a new session.',
+        parameters: {
+          currentVersion: { type: 'string', required: false, description: 'The version from your current CLAUDE.md (e.g., "1.1.0")' }
+        }
+      },
+      {
+        name: 'get_available_services',
+        description: 'Query the DE service registry to discover available backend services',
+        parameters: {
+          category: { type: 'string', required: false, enum: ['llm', 'storage', 'voice', 'image', 'utility', 'auth', 'memory'], description: 'Filter by category' },
+          status: { type: 'string', required: false, enum: ['active', 'beta', 'deprecated', 'planned'], description: 'Filter by status' },
+          search: { type: 'string', required: false, description: 'Search term' },
+          include_capabilities: { type: 'boolean', required: false, default: false, description: 'Include detailed capabilities' }
+        }
       }
     ]
   });
@@ -401,6 +614,9 @@ function createMcpServerWithBindings(env: Bindings) {
     },
     async ({ query, category, framework, tags, limit }): Promise<CallToolResult> => {
       try {
+        // Sanitize query for FTS5 (handle hyphens, special chars)
+        const sanitizedQuery = sanitizeFtsQuery(query);
+
         let sql = `
           SELECT
             g.id,
@@ -420,7 +636,7 @@ function createMcpServerWithBindings(env: Bindings) {
           WHERE guides_fts MATCH ?
         `;
 
-        const params: any[] = [query];
+        const params: any[] = [sanitizedQuery];
 
         if (category) {
           sql += ` AND g.category LIKE ?`;
@@ -730,6 +946,207 @@ function createMcpServerWithBindings(env: Bindings) {
     }
   );
 
+  // Register tool: initialize_claude_md
+  server.tool(
+    'initialize_claude_md',
+    'Get the CLAUDE.md setup template and version info. Call this first when starting a new session to ensure CLAUDE.md is configured correctly.',
+    {
+      currentVersion: z.string().optional().describe('The version string from your current CLAUDE.md (if any), e.g., "1.1.0"')
+    },
+    async ({ currentVersion }): Promise<CallToolResult> => {
+      const LATEST_VERSION = '1.1.0';
+
+      const template = `<!-- Developer Guides MCP Setup v${LATEST_VERSION} - Check for updates: docs/CLAUDE-MD-SETUP.md -->
+## Developer Guidelines (MCP Server)
+
+### Required: Check Before Implementing
+
+ALWAYS search the developer guides before:
+- Writing new functions or modules
+- Implementing error handling
+- Adding validation logic
+- Creating API endpoints
+- Writing database queries
+- Adding authentication or security features
+
+This is not optional - established patterns must be followed for consistency and security.
+
+### Quick Reference
+
+| Task | Search Query |
+|------|-------------|
+| Input validation | \`query="zod validation"\` |
+| Error handling | \`query="error classes"\` |
+| API security | \`query="authentication middleware"\` |
+| Database queries | \`query="parameterized queries"\` |
+| Testing patterns | \`query="unit test"\` |
+| Logging/monitoring | \`query="observability"\` |
+
+### How to Access
+
+Search by topic:
+\`\`\`
+mcp__developer-guides__search_developer_guides query="validation"
+\`\`\`
+
+Get specific guide:
+\`\`\`
+mcp__developer-guides__get_guide guideId="guide-07-security"
+mcp__developer-guides__get_guide guideId="guide-01-fundamentals"
+\`\`\`
+
+List all available guides:
+\`\`\`
+mcp__developer-guides__list_guides
+\`\`\`
+
+### Available Guides
+
+| Guide | Use For |
+|-------|---------|
+| \`guide-01-fundamentals\` | Code organization, naming, error handling, types |
+| \`guide-02-11-arch-devops\` | Architecture patterns, CI/CD, deployment |
+| \`guide-05-10-db-perf\` | Database schemas, queries, performance |
+| \`guide-07-security\` | Validation, auth, secrets, CORS, rate limiting |
+| \`guide-09-testing\` | Unit, integration, E2E testing patterns |
+| \`Cloudflare-Workers-Guide\` | Cloudflare Workers patterns, bindings, KV, D1 |
+| \`Frontend-Development-Guide\` | Frontend patterns, components, state management |
+| \`AI and Observability-Guide\` | AI integration, logging, monitoring, tracing |
+
+### Key Patterns to Follow
+- Use Zod schemas for all input validation
+- Use custom error classes (\`AppError\`, \`ValidationError\`, \`NotFoundError\`)
+- Never concatenate SQL queries - use parameterized queries
+- Store secrets in environment variables, never in code
+
+### Improving the Guides
+
+If you find gaps, outdated patterns, or better approaches while working:
+\`\`\`
+mcp__developer-guides__propose_guide_change guideId="guide-07-security" section="Authentication" currentText="..." proposedText="..." rationale="Found a better pattern for..."
+\`\`\`
+Proposals help keep the guides current and comprehensive.`;
+
+      const isUpToDate = currentVersion === LATEST_VERSION;
+      const needsUpdate = currentVersion && currentVersion !== LATEST_VERSION;
+      const needsCreation = !currentVersion;
+
+      let action: string;
+      if (isUpToDate) {
+        action = 'none';
+      } else if (needsUpdate) {
+        action = 'update';
+      } else {
+        action = 'create';
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              latestVersion: LATEST_VERSION,
+              currentVersion: currentVersion || null,
+              action,
+              instructions: action === 'none'
+                ? 'CLAUDE.md is up to date. No action needed.'
+                : action === 'update'
+                ? `CLAUDE.md is outdated (${currentVersion} -> ${LATEST_VERSION}). Replace the "Developer Guidelines (MCP Server)" section with the template below.`
+                : 'CLAUDE.md does not have the Developer Guidelines section. Add the template below to your project\'s CLAUDE.md file.',
+              template: action === 'none' ? null : template
+            }, null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  // Register tool: get_available_services
+  server.tool(
+    'get_available_services',
+    'Query the service registry to discover what DE (Distributed Electrons) services are available. Use this to understand what backend capabilities exist before building new features.',
+    {
+      category: z.enum(['llm', 'storage', 'voice', 'image', 'utility', 'auth', 'memory']).optional().describe('Filter by service category'),
+      status: z.enum(['active', 'beta', 'deprecated', 'planned']).optional().describe('Filter by service status'),
+      search: z.string().optional().describe('Search term to match against name/description'),
+      include_capabilities: z.boolean().optional().default(false).describe('Include detailed capabilities for each service')
+    },
+    async ({ category, status, search, include_capabilities }): Promise<CallToolResult> => {
+      try {
+        let sql = `
+          SELECT s.*,
+                 GROUP_CONCAT(DISTINCT sp.provider_name) as providers
+          FROM services s
+          LEFT JOIN service_providers sp ON s.id = sp.service_id
+          WHERE 1=1
+        `;
+        const params: any[] = [];
+
+        if (category) {
+          sql += ` AND s.category = ?`;
+          params.push(category);
+        }
+
+        if (status) {
+          sql += ` AND s.status = ?`;
+          params.push(status);
+        }
+
+        if (search) {
+          sql += ` AND (s.name LIKE ? OR s.description LIKE ?)`;
+          params.push(`%${search}%`, `%${search}%`);
+        }
+
+        sql += ` GROUP BY s.id ORDER BY s.category, s.name`;
+
+        const servicesResult = await env.DB.prepare(sql).bind(...params).all();
+        const services = servicesResult.results || [];
+
+        // Optionally fetch capabilities
+        if (include_capabilities && services.length > 0) {
+          for (const service of services as any[]) {
+            const caps = await env.DB.prepare(
+              `SELECT capability, description, input_schema, output_schema FROM service_capabilities WHERE service_id = ?`
+            ).bind(service.id).all();
+            service.capabilities = caps.results || [];
+          }
+        }
+
+        // Also fetch dependencies if capabilities are requested
+        if (include_capabilities && services.length > 0) {
+          for (const service of services as any[]) {
+            const deps = await env.DB.prepare(
+              `SELECT depends_on_service_id, dependency_type FROM service_dependencies WHERE service_id = ?`
+            ).bind(service.id).all();
+            service.dependencies = deps.results || [];
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                count: services.length,
+                services: services.map((s: any) => ({
+                  ...s,
+                  providers: s.providers ? s.providers.split(',') : []
+                }))
+              }, null, 2)
+            }
+          ]
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
   // Register tool: get_guide_stats
   server.tool(
     'get_guide_stats',
@@ -785,8 +1202,8 @@ app.all('/mcp', async (c) => {
 app.get('/', (c) => {
   return c.json({
     name: 'Developer Guides MCP Server',
-    version: '1.0.0',
-    description: 'MCP server for querying and managing developer guidelines',
+    version: '1.1.0',
+    description: 'MCP server for querying developer guidelines and DE service registry',
     endpoints: {
       mcp: '/mcp',
       health: '/health',
@@ -796,7 +1213,10 @@ app.get('/', (c) => {
       list_guides: '/tools/list_guides',
       related_guides: '/tools/get_related_guides',
       propose_change: '/tools/propose_guide_change',
-      stats: '/tools/get_guide_stats'
+      stats: '/tools/get_guide_stats',
+      initialize: '/tools/initialize_claude_md',
+      services: '/tools/get_available_services',
+      sync_registry: '/api/sync-registry'
     }
   });
 });

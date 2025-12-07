@@ -5,15 +5,30 @@
 
 This guide explains how to configure Claude Code to use the Developer Guides MCP server for accessing coding standards and best practices.
 
-## ⚠️ First Step: Verify Your Setup
+## Automatic Setup (Recommended)
 
-**Before using the Developer Guides MCP server, always verify your local `CLAUDE.md` is configured correctly:**
+The MCP server includes an `initialize_claude_md` tool that automatically manages CLAUDE.md setup. When Claude Code first uses this MCP server in a session, it should:
 
-1. Check that your project's `CLAUDE.md` contains the "Developer Guidelines (MCP Server)" section
-2. Verify the version comment matches this document's version (see template below)
-3. If outdated or missing, copy the latest template from Step 2
+1. Check if the project's `CLAUDE.md` has the Developer Guidelines section
+2. Extract the version from the comment: `<!-- Developer Guides MCP Setup vX.X.X -->`
+3. Call `initialize_claude_md` with the current version (or no version if missing)
+4. Follow the returned instructions to create/update CLAUDE.md as needed
 
-To check for updates, review the latest version of this file in the developer-guides-mcp repository.
+### How it works
+
+```
+mcp__developer-guides__initialize_claude_md currentVersion="1.1.0"
+```
+
+The tool returns:
+- `action`: "none" (up to date), "update" (outdated), or "create" (missing)
+- `latestVersion`: The current version on the server
+- `template`: The content to add/update (if action is not "none")
+- `instructions`: Human-readable guidance
+
+## Manual Setup (Alternative)
+
+If you prefer to set up manually, follow the steps below.
 
 ## Features
 
@@ -132,6 +147,7 @@ The server provides these tools:
 
 | Tool | Description |
 |------|-------------|
+| `initialize_claude_md` | Get CLAUDE.md setup template and version info (call first in session) |
 | `search_developer_guides` | Full-text search across all guides |
 | `get_guide` | Retrieve complete guide content by ID |
 | `list_guides` | List all available guides with metadata |
