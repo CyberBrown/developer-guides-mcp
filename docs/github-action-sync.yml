@@ -1,0 +1,51 @@
+# GitHub Action: Sync Service Registry on DE Deploy
+# Add this to the DE repository at .github/workflows/sync-registry.yml
+
+name: Sync Service Registry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services-manifest.json'
+      - 'workers/**'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Services Manifest
+        id: manifest
+        run: |
+          if [ -f services-manifest.json ]; then
+            SERVICES=$(cat services-manifest.json | jq -c '.services')
+            echo "services=$SERVICES" >> $GITHUB_OUTPUT
+            echo "has_manifest=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_manifest=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync to Developer Guides MCP
+        if: steps.manifest.outputs.has_manifest == 'true'
+        run: |
+          curl -X POST "${{ secrets.DEVELOPER_GUIDES_WEBHOOK_URL }}/api/sync-registry" \
+            -H "Authorization: Bearer ${{ secrets.REGISTRY_SYNC_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "source": "github-action",
+              "commit": "${{ github.sha }}",
+              "services": ${{ steps.manifest.outputs.services }}
+            }'
+
+      - name: Report Result
+        if: always()
+        run: |
+          echo "Registry sync completed for commit ${{ github.sha }}"
+
+# Required secrets in DE repository:
+# - DEVELOPER_GUIDES_WEBHOOK_URL: https://developer-guides-mcp.solamp.workers.dev
+# - REGISTRY_SYNC_TOKEN: The token set via `wrangler secret put REGISTRY_SYNC_TOKEN`

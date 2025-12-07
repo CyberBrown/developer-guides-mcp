@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "DE Services Manifest - Place this file in the DE repository root as services-manifest.json",
+  "version": "1.0.0",
+  "last_updated": "2025-12-04T00:00:00Z",
+  "services": [
+    {
+      "id": "text-gen",
+      "name": "Text Generation",
+      "description": "LLM text generation via OpenAI/Anthropic/Gemini providers",
+      "category": "llm",
+      "status": "active",
+      "worker": "text-gen",
+      "capabilities": [
+        {
+          "capability": "chat_completion",
+          "description": "Generate chat responses with conversation history"
+        },
+        {
+          "capability": "text_completion",
+          "description": "Generate text completions from a prompt"
+        },
+        {
+          "capability": "streaming_chat",
+          "description": "Stream chat responses in real-time"
+        }
+      ],
+      "providers": ["openai", "anthropic", "gemini"]
+    },
+    {
+      "id": "image-gen",
+      "name": "Image Generation",
+      "description": "Image generation via Ideogram API",
+      "category": "image",
+      "status": "active",
+      "worker": "image-gen",
+      "capabilities": [
+        {
+          "capability": "generate_image",
+          "description": "Generate images from text prompts"
+        },
+        {
+          "capability": "remix_image",
+          "description": "Generate variations of an existing image"
+        }
+      ],
+      "providers": ["ideogram"]
+    },
+    {
+      "id": "config-service",
+      "name": "Config Service",
+      "description": "Central configuration management for the worker swarm",
+      "category": "utility",
+      "status": "active",
+      "worker": "config-service",
+      "capabilities": [
+        {
+          "capability": "get_config",
+          "description": "Retrieve configuration values by key"
+        },
+        {
+          "capability": "set_config",
+          "description": "Update configuration values"
+        },
+        {
+          "capability": "list_configs",
+          "description": "List all configuration keys for an instance"
+        }
+      ],
+      "providers": []
+    }
+  ],
+  "_instructions": {
+    "usage": "This manifest is read by the developer-guides MCP server to populate the service registry.",
+    "sync_endpoint": "POST https://developer-guides-mcp.solamp.workers.dev/api/sync-registry",
+    "github_action": "See docs/github-action-sync.yml for automated sync on deploy",
+    "categories": ["llm", "storage", "voice", "image", "utility", "auth", "memory"],
+    "statuses": ["active", "beta", "deprecated", "planned"]
+  }
+}
