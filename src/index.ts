@@ -566,9 +566,32 @@ app.get('/tools', (c) => {
         }
       },
       {
+        name: 'propose_new_guide',
+        description: 'Propose a new guide to be added to the developer guides. Accepts full markdown content for review.',
+        parameters: {
+          guideId: { type: 'string', required: true, description: 'Proposed ID for the new guide' },
+          title: { type: 'string', required: true, description: 'Title of the guide' },
+          category: { type: 'string', required: true, description: 'Category (e.g., "tools", "architecture")' },
+          type: { type: 'string', required: true, description: 'Type: "guide", "reference", or "planning"' },
+          tags: { type: 'array', required: true, description: 'Array of searchable tags' },
+          markdownContent: { type: 'string', required: true, description: 'Full markdown content of the guide' },
+          rationale: { type: 'string', required: true, description: 'Why this guide should be added' },
+          relatedGuides: { type: 'array', required: false, description: 'Array of related guide IDs' },
+          proposedBy: { type: 'string', required: false, default: 'claude-ai', description: 'Who is proposing the guide' }
+        }
+      },
+      {
         name: 'get_guide_stats',
         description: 'Get statistics about the developer guides system',
         parameters: {}
+      },
+      {
+        name: 'list_guide_proposals',
+        description: 'List pending guide proposals (both new guides and changes to existing guides)',
+        parameters: {
+          status: { type: 'string', required: false, enum: ['pending', 'approved', 'rejected', 'deferred'], default: 'pending', description: 'Filter by proposal status' },
+          includeContent: { type: 'boolean', required: false, default: false, description: 'Include full markdown content' }
+        }
       },
       {
         name: 'initialize_claude_md',
@@ -933,6 +956,148 @@ function createMcpServerWithBindings(env: Bindings) {
                 success: true,
                 proposalId,
                 message: 'Change proposal created successfully'
+              }, null, 2)
+            }
+          ]
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // Register tool: propose_new_guide
+  server.tool(
+    'propose_new_guide',
+    'Propose a new guide to be added to the developer guides. Accepts full markdown content for review before publishing.',
+    {
+      guideId: z.string().describe('Proposed ID for the new guide (e.g., "mcp-usage-guide")'),
+      title: z.string().describe('Title of the guide'),
+      category: z.string().describe('Category (e.g., "tools", "architecture", "database")'),
+      type: z.string().describe('Type of guide: "guide", "reference", or "planning"'),
+      tags: z.array(z.string()).describe('Array of searchable tags'),
+      markdownContent: z.string().describe('Full markdown content of the guide'),
+      rationale: z.string().describe('Why this guide should be added'),
+      relatedGuides: z.array(z.string()).optional().describe('Array of related guide IDs'),
+      proposedBy: z.string().optional().default('claude-ai').describe('Who is proposing the guide')
+    },
+    async ({ guideId, title, category, type, tags, markdownContent, rationale, relatedGuides, proposedBy }): Promise<CallToolResult> => {
+      try {
+        // Check if guide ID already exists
+        const existingGuide = await env.DB.prepare(`
+          SELECT id FROM guides WHERE id = ?
+        `).bind(guideId).first();
+
+        if (existingGuide) {
+          return {
+            content: [{ type: 'text', text: `Guide with ID "${guideId}" already exists. Use propose_guide_change to modify existing guides.` }],
+            isError: true
+          };
+        }
+
+        // Check if there's already a pending proposal for this guide ID
+        const existingProposal = await env.DB.prepare(`
+          SELECT id FROM guide_proposals WHERE guide_id = ? AND proposal_status = 'pending'
+        `).bind(guideId).first();
+
+        if (existingProposal) {
+          return {
+            content: [{ type: 'text', text: `A pending proposal for guide ID "${guideId}" already exists. Wait for review or use a different ID.` }],
+            isError: true
+          };
+        }
+
+        const proposalId = `guide-proposal-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        await env.DB.prepare(`
+          INSERT INTO guide_proposals (
+            id, guide_id, title, category, type, tags, related_guides,
+            markdown_content, rationale, proposed_by, proposal_status, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        `).bind(
+          proposalId,
+          guideId,
+          title,
+          category,
+          type,
+          JSON.stringify(tags),
+          JSON.stringify(relatedGuides || []),
+          markdownContent,
+          rationale,
+          proposedBy,
+          new Date().toISOString()
+        ).run();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                proposalId,
+                guideId,
+                message: 'New guide proposal created successfully. Awaiting review.'
+              }, null, 2)
+            }
+          ]
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // Register tool: list_guide_proposals
+  server.tool(
+    'list_guide_proposals',
+    'List pending guide proposals (both new guides and changes to existing guides)',
+    {
+      status: z.enum(['pending', 'approved', 'rejected', 'deferred']).optional().default('pending').describe('Filter by proposal status'),
+      includeContent: z.boolean().optional().default(false).describe('Include full markdown content in response')
+    },
+    async ({ status, includeContent }): Promise<CallToolResult> => {
+      try {
+        // Get new guide proposals
+        const newGuideProposals = await env.DB.prepare(`
+          SELECT id, guide_id, title, category, type, tags, rationale, proposed_by, proposal_status, created_at
+          ${includeContent ? ', markdown_content' : ''}
+          FROM guide_proposals
+          WHERE proposal_status = ?
+          ORDER BY created_at DESC
+        `).bind(status).all();
+
+        // Get change proposals
+        const changeProposals = await env.DB.prepare(`
+          SELECT id, guide_id, section, rationale, proposed_by, status, created_at
+          ${includeContent ? ', current_text, proposed_text' : ''}
+          FROM change_proposals
+          WHERE status = ?
+          ORDER BY created_at DESC
+        `).bind(status).all();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                newGuideProposals: {
+                  count: newGuideProposals.results?.length || 0,
+                  proposals: newGuideProposals.results?.map((p: any) => ({
+                    ...p,
+                    tags: JSON.parse(p.tags || '[]')
+                  }))
+                },
+                changeProposals: {
+                  count: changeProposals.results?.length || 0,
+                  proposals: changeProposals.results
+                }
               }, null, 2)
             }
           ]
