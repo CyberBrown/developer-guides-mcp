@@ -586,6 +586,31 @@ app.get('/tools', (c) => {
           search: { type: 'string', required: false, description: 'Search term' },
           include_capabilities: { type: 'boolean', required: false, default: false, description: 'Include detailed capabilities' }
         }
+      },
+      {
+        name: 'propose_new_guide',
+        description: 'Propose a completely new guide to be added to the system',
+        parameters: {
+          guideId: { type: 'string', required: true, description: 'Unique identifier for the guide' },
+          title: { type: 'string', required: true, description: 'Full title of the guide' },
+          category: { type: 'string', required: true, description: 'Category (architecture, testing, security, etc.)' },
+          type: { type: 'string', required: false, enum: ['guide', 'reference', 'planning', 'index'], default: 'guide', description: 'Type of document' },
+          status: { type: 'string', required: false, enum: ['draft', 'review', 'finalized'], default: 'draft', description: 'Proposed status' },
+          tags: { type: 'array', required: false, description: 'Tags for searchability' },
+          relatedGuides: { type: 'array', required: false, description: 'IDs of related guides' },
+          markdownContent: { type: 'string', required: true, description: 'Full markdown content of the guide' },
+          rationale: { type: 'string', required: true, description: 'Why this guide should be added' },
+          proposedBy: { type: 'string', required: false, default: 'claude-code-cli', description: 'Who is proposing this guide' }
+        }
+      },
+      {
+        name: 'list_proposals',
+        description: 'List pending proposals for review - both change proposals and new guide proposals',
+        parameters: {
+          type: { type: 'string', required: false, enum: ['all', 'changes', 'new_guides'], default: 'all', description: 'Type of proposals to list' },
+          status: { type: 'string', required: false, enum: ['pending', 'approved', 'rejected', 'all'], default: 'pending', description: 'Filter by status' },
+          limit: { type: 'number', required: false, default: 20, description: 'Maximum number to return' }
+        }
       }
     ]
   });
@@ -1134,6 +1159,176 @@ Proposals help keep the guides current and comprehensive.`;
                   ...s,
                   providers: s.providers ? s.providers.split(',') : []
                 }))
+              }, null, 2)
+            }
+          ]
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // Register tool: propose_new_guide
+  server.tool(
+    'propose_new_guide',
+    'Propose a completely new guide to be added to the system. Use this when you have synthesized research, documentation, or patterns that should become a permanent guide.',
+    {
+      guideId: z.string().describe('Unique identifier for the guide (e.g., "open-source-patterns-synthesis")'),
+      title: z.string().describe('Full title of the guide'),
+      category: z.string().describe('Category (architecture, testing, security, fundamentals, meta, etc.)'),
+      type: z.enum(['guide', 'reference', 'planning', 'index']).optional().default('guide').describe('Type of document'),
+      status: z.enum(['draft', 'review', 'finalized']).optional().default('draft').describe('Proposed status'),
+      tags: z.array(z.string()).optional().describe('Tags for searchability'),
+      relatedGuides: z.array(z.string()).optional().describe('IDs of related guides'),
+      markdownContent: z.string().describe('Full markdown content of the guide'),
+      rationale: z.string().describe('Why this guide should be added'),
+      proposedBy: z.string().optional().default('claude-code-cli').describe('Who is proposing this guide')
+    },
+    async ({ guideId, title, category, type, status, tags, relatedGuides, markdownContent, rationale, proposedBy }): Promise<CallToolResult> => {
+      try {
+        // Check if guide already exists
+        const existingGuide = await env.DB.prepare(
+          'SELECT id FROM guides WHERE id = ?'
+        ).bind(guideId).first();
+
+        if (existingGuide) {
+          return {
+            content: [{ type: 'text', text: `Error: A guide with ID "${guideId}" already exists. Use propose_guide_change to modify it.` }],
+            isError: true
+          };
+        }
+
+        // Check if there's already a pending proposal for this guide ID
+        const existingProposal = await env.DB.prepare(
+          'SELECT id FROM guide_proposals WHERE guide_id = ? AND proposal_status = "pending"'
+        ).bind(guideId).first();
+
+        if (existingProposal) {
+          return {
+            content: [{ type: 'text', text: `Error: A pending proposal for guide ID "${guideId}" already exists.` }],
+            isError: true
+          };
+        }
+
+        const proposalId = `guide-proposal-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        await env.DB.prepare(`
+          INSERT INTO guide_proposals (
+            id, guide_id, title, category, type, status, version,
+            tags, related_guides, markdown_content,
+            proposed_by, rationale, proposal_status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, '1.0.0', ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
+        `).bind(
+          proposalId,
+          guideId,
+          title,
+          category,
+          type || 'guide',
+          status || 'draft',
+          tags ? JSON.stringify(tags) : null,
+          relatedGuides ? JSON.stringify(relatedGuides) : null,
+          markdownContent,
+          proposedBy || 'claude-code-cli',
+          rationale
+        ).run();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                proposalId,
+                guideId,
+                message: 'New guide proposal created successfully. It will be reviewed before being added to the guides system.'
+              }, null, 2)
+            }
+          ]
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  // Register tool: list_proposals
+  server.tool(
+    'list_proposals',
+    'List pending proposals for review - includes both change proposals (modifications to existing guides) and new guide proposals',
+    {
+      type: z.enum(['all', 'changes', 'new_guides']).optional().default('all').describe('Type of proposals to list'),
+      status: z.enum(['pending', 'approved', 'rejected', 'all']).optional().default('pending').describe('Filter by proposal status'),
+      limit: z.number().optional().default(20).describe('Maximum number of proposals to return')
+    },
+    async ({ type, status, limit }): Promise<CallToolResult> => {
+      try {
+        const results: any = {
+          change_proposals: [],
+          guide_proposals: []
+        };
+
+        // Fetch change proposals
+        if (type === 'all' || type === 'changes') {
+          let changeSql = `
+            SELECT id, guide_id, section, SUBSTR(rationale, 1, 200) as rationale_preview,
+                   proposed_by, status, created_at, reviewed_at, reviewed_by
+            FROM change_proposals
+          `;
+          const changeParams: any[] = [];
+
+          if (status !== 'all') {
+            changeSql += ' WHERE status = ?';
+            changeParams.push(status);
+          }
+
+          changeSql += ' ORDER BY created_at DESC LIMIT ?';
+          changeParams.push(limit);
+
+          const changeResults = await env.DB.prepare(changeSql).bind(...changeParams).all();
+          results.change_proposals = changeResults.results || [];
+        }
+
+        // Fetch guide proposals
+        if (type === 'all' || type === 'new_guides') {
+          let guideSql = `
+            SELECT id, guide_id, title, category, type,
+                   SUBSTR(rationale, 1, 200) as rationale_preview,
+                   proposed_by, proposal_status as status, created_at, reviewed_at, reviewed_by
+            FROM guide_proposals
+          `;
+          const guideParams: any[] = [];
+
+          if (status !== 'all') {
+            guideSql += ' WHERE proposal_status = ?';
+            guideParams.push(status);
+          }
+
+          guideSql += ' ORDER BY created_at DESC LIMIT ?';
+          guideParams.push(limit);
+
+          const guideResults = await env.DB.prepare(guideSql).bind(...guideParams).all();
+          results.guide_proposals = guideResults.results || [];
+        }
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                counts: {
+                  change_proposals: results.change_proposals.length,
+                  guide_proposals: results.guide_proposals.length,
+                  total: results.change_proposals.length + results.guide_proposals.length
+                },
+                ...results
               }, null, 2)
             }
           ]
