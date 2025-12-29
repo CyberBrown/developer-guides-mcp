@@ -4,8 +4,8 @@ title: Developer Guide Index & Navigation
 category: meta
 type: index
 status: finalized
-version: 2.1.0
-last_updated: 2025-12-04
+version: 2.2.0
+last_updated: 2025-12-29
 tags: [index, navigation, overview, getting-started, ecosystem, DE, multi-agent]
 ---
 
@@ -140,6 +140,7 @@ The Three Pillars of our development ecosystem:
 
 | Guide ID | Title | Focus | Status |
 |----------|-------|-------|--------|
+| DE-Workflows-Architecture | [DE Workflows Architecture](./DE-Workflows-Architecture.md) | Single entry point, PrimeWorkflow routing | ✅ |
 | ecosystem-architecture | [Ecosystem Architecture Reference](./ecosystem-architecture-reference.md) | DE, Mnemo, Nexus philosophy | ✅ |
 | scale-orchestration | [Scale & Multi-Agent Orchestration](./scale-orchestration-guide.md) | 4x4x4 model, parallel dev | 📝 |
 
@@ -410,6 +411,11 @@ Create a Linear ticket with:
 ---
 
 ## Changelog
+
+### v2.2.0 (2025-12-29)
+- Added DE Workflows Architecture guide documenting single entry point pattern
+- Documents PrimeWorkflow routing logic and request schema
+- Addresses routing bypass fix from Dec 28, 2025
 
 ### v2.1.0 (2025-12-04)
 - Added Ecosystem Architecture section (Three Pillars: DE, Mnemo, Nexus)
